@@ -10,8 +10,9 @@ class SpellingScreen extends StatefulWidget {
 }
 
 class _SpellingScreenState extends State<SpellingScreen> {
-  final FlutterTts _flutterTts = FlutterTts();
+  FlutterTts? _flutterTts;
   final TextEditingController _textController = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
 
   final List<String> _wordList = [
     "apple", "banana", "elephant", "rhythm", "xylophone",
@@ -27,26 +28,54 @@ class _SpellingScreenState extends State<SpellingScreen> {
   @override
   void initState() {
     super.initState();
-    _initTts();
+    _initializeAndStart();
+  }
+
+  Future<void> _initializeAndStart() async {
+    await _initTts();
+    if (!mounted) return;
     _startNewWord();
   }
 
   Future<void> _initTts() async {
-    await _flutterTts.setLanguage("en-GB");
-    await _flutterTts.setSpeechRate(0.65);
-    await _flutterTts.setPitch(1.0);
+    _flutterTts = FlutterTts();
+    try {
+      await _flutterTts!.setLanguage("en-GB");
+      await _flutterTts!.setPitch(1.0);
+      await _flutterTts!.setSpeechRate(0.65);
+
+      _flutterTts!.setCompletionHandler(() {
+        if (mounted) setState(() => _isSpeaking = false);
+      });
+    } catch (e) {
+      print("TTS Init Error: $e");
+    }
   }
 
   void _startNewWord() {
     _textController.clear();
     _feedback = "";
-    _timeLeft = _calculateTimeForWord(_wordList[_currentIndex]);
-    _startTimer();
-    _speakCurrentWord();
+    _isSpeaking = true;
+
+    _resetTtsSettings().then((_) {
+      _speakCurrentWord().then((_) {
+        if (!mounted) return;
+        _timeLeft = _calculateTimeForWord(_wordList[_currentIndex]);
+        _startTimer();
+        _focusNode.requestFocus();
+      });
+    });
+  }
+
+  Future<void> _resetTtsSettings() async {
+    if (_flutterTts == null) return;
+    try {
+      await _flutterTts!.setSpeechRate(0.65);
+    } catch (e) {}
   }
 
   int _calculateTimeForWord(String word) {
-    return 8 + (word.length * 1.2).round();
+    return 8 + (word.length * 1.1).round();
   }
 
   void _startTimer() {
@@ -62,38 +91,63 @@ class _SpellingScreenState extends State<SpellingScreen> {
 
   void _timeUp() {
     _timer?.cancel();
+    if (!mounted) return;
+
     setState(() {
       _feedback = "⏰ Time's up, mortal. The word was: ${_wordList[_currentIndex]}";
     });
-    Future.delayed(const Duration(seconds: 2), _nextWord);
+
+    Future.delayed(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      _nextWord();
+    });
   }
 
   Future<void> _speakCurrentWord() async {
-    setState(() => _isSpeaking = true);
-    await _flutterTts.speak(_wordList[_currentIndex]);
-    setState(() => _isSpeaking = false);
+    try {
+      setState(() => _isSpeaking = true);
+      await _flutterTts?.speak(_wordList[_currentIndex]);
+    } catch (e) {
+      print("TTS Error: $e");
+    } finally {
+      if (mounted) setState(() => _isSpeaking = false);
+    }
   }
 
   void _checkSpelling() {
     _timer?.cancel();
+    _flutterTts?.stop();
+    if (!mounted) return;
+
+    setState(() => _isSpeaking = false);
+
     String correctWord = _wordList[_currentIndex].toLowerCase();
     String userAnswer = _textController.text.trim().toLowerCase();
 
     if (userAnswer == correctWord) {
       setState(() => _feedback = "✅ Finally... Correct. Don't get cocky.");
-      Future.delayed(const Duration(milliseconds: 1200), _nextWord);
+      Future.delayed(const Duration(milliseconds: 1200), () {
+        if (!mounted) return;
+        _nextWord();
+      });
     } else {
       setState(() {
         _feedback = "❌ Pathetic. It's spelled: ${_wordList[_currentIndex]}";
       });
-      Future.delayed(const Duration(seconds: 2), _nextWord);
+      Future.delayed(const Duration(seconds: 2), () {
+        if (!mounted) return;
+        _nextWord();
+      });
     }
   }
 
   void _nextWord() {
+    if (!mounted) return;
+
     setState(() {
       _currentIndex = (_currentIndex + 1) % _wordList.length;
     });
+
     _startNewWord();
   }
 
@@ -101,7 +155,8 @@ class _SpellingScreenState extends State<SpellingScreen> {
   void dispose() {
     _timer?.cancel();
     _textController.dispose();
-    _flutterTts.stop();
+    _focusNode.dispose();
+    _flutterTts?.stop();
     super.dispose();
   }
 
@@ -152,7 +207,10 @@ class _SpellingScreenState extends State<SpellingScreen> {
                     ),
                     const SizedBox(height: 12),
                     ElevatedButton.icon(
-                      onPressed: _speakCurrentWord,
+                      onPressed: () async {
+                        await _resetTtsSettings();
+                        _speakCurrentWord();
+                      },
                       icon: const Icon(Icons.volume_up),
                       label: const Text("Repeat"),
                     ),
@@ -165,6 +223,7 @@ class _SpellingScreenState extends State<SpellingScreen> {
 
             TextField(
               controller: _textController,
+              focusNode: _focusNode,
               decoration: const InputDecoration(
                 labelText: "Type your answer",
                 border: OutlineInputBorder(),
@@ -173,7 +232,7 @@ class _SpellingScreenState extends State<SpellingScreen> {
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 26),
               autofocus: true,
-              onSubmitted: (_) => _checkSpelling(),   // Enter key support
+              onSubmitted: (_) => _checkSpelling(),
             ),
 
             const SizedBox(height: 24),
