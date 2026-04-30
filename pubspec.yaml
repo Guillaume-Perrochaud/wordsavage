@@ -37,6 +37,7 @@ dependencies:
   google_fonts: ^6.2.0          # Nice fonts
   lottie: ^3.1.0                # Fun animations (T-Rex etc.)
   shared_preferences: ^2.3.0    # Save user progress
+  permission_handler: ^11.3.1   # Handle runtime permissions
 
 dev_dependencies:
   flutter_test:
