@@ -3,9 +3,11 @@ import 'package:flutter/services.dart';
 import 'screens/welcome_screen.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized(); // Important for orientation
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  WidgetsFlutterBinding.ensureInitialized();
   
+  // Lock the entire app to portrait mode
+  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
   runApp(const WordSavageApp());
 }
 

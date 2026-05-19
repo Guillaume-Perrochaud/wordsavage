@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:speech_to_text/speech_recognition_error.dart';
+import 'package:speech_to_text/speech_recognition_result.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 import 'dart:async';
 
 enum InputMode { keyboard, microphone }
@@ -15,7 +17,10 @@ class SpellingScreen extends StatefulWidget {
 
 class _SpellingScreenState extends State<SpellingScreen> {
   final FlutterTts _flutterTts = FlutterTts();
-  final stt.SpeechToText _speech = stt.SpeechToText();
+  final SpeechToText _speechToText = SpeechToText();
+  bool _speechReady = false;
+  bool _isListening = false;
+
   final TextEditingController _textController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
 
@@ -26,7 +31,6 @@ class _SpellingScreenState extends State<SpellingScreen> {
 
   int _currentIndex = 0;
   bool _isSpeaking = false;
-  bool _isListening = false;
   Timer? _timer;
   int _timeLeft = 0;
   InputMode _mode = InputMode.keyboard;
@@ -36,6 +40,7 @@ class _SpellingScreenState extends State<SpellingScreen> {
   void initState() {
     super.initState();
     _configureTts();
+    _initSpeech();
     WidgetsBinding.instance.addPostFrameCallback((_) => _showStartDialog());
   }
 
@@ -43,6 +48,22 @@ class _SpellingScreenState extends State<SpellingScreen> {
     await _flutterTts.setLanguage("en-GB");
     await _flutterTts.setPitch(1.1);
     await _flutterTts.setSpeechRate(0.65);
+  }
+
+  Future<void> _initSpeech() async {
+    final available = await _speechToText.initialize(
+      onStatus: _onSpeechStatus,
+      onError: _onSpeechError,
+    );
+
+    if (available) {
+      setState(() => _speechReady = true);
+      debugPrint('✅ Speech-to-text initialized successfully');
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Speech recognition is not available on this device')),
+      );
+    }
   }
 
   void _showStartDialog() {
@@ -53,22 +74,8 @@ class _SpellingScreenState extends State<SpellingScreen> {
         title: const Text("🎮 Spelling Challenge"),
         content: const Text("Choose your weapon:\n\n⌨️ Keyboard — Type exactly\n🎤 Microphone — Speak letters one by one"),
         actions: [
-          TextButton(
-            onPressed: () {
-              setState(() => _mode = InputMode.keyboard);
-              Navigator.pop(context);
-              Future.delayed(const Duration(seconds: 2), _startNewWord);
-            },
-            child: const Text("⌨️ Keyboard"),
-          ),
-          TextButton(
-            onPressed: () {
-              setState(() => _mode = InputMode.microphone);
-              Navigator.pop(context);
-              Future.delayed(const Duration(seconds: 2), _startNewWord);
-            },
-            child: const Text("🎤 Microphone"),
-          ),
+          TextButton(onPressed: () { setState(() => _mode = InputMode.keyboard); Navigator.pop(context); Future.delayed(const Duration(seconds: 2), _startNewWord); }, child: const Text("⌨️ Keyboard")),
+          TextButton(onPressed: () { setState(() => _mode = InputMode.microphone); Navigator.pop(context); Future.delayed(const Duration(seconds: 2), _startNewWord); }, child: const Text("🎤 Microphone")),
         ],
       ),
     );
@@ -95,8 +102,8 @@ class _SpellingScreenState extends State<SpellingScreen> {
         Future.delayed(const Duration(milliseconds: 800), () {
           if (mounted) _focusNode.requestFocus();
         });
-      } else {
-        _startPersistentListening();
+      } else if (_speechReady) {
+        _startListening();
       }
     });
   }
@@ -127,7 +134,7 @@ class _SpellingScreenState extends State<SpellingScreen> {
 
   Future<void> _endRound({bool isTimeUp = false}) async {
     _timer?.cancel();
-    if (_mode == InputMode.microphone) _stopListening();
+    _stopListening();
 
     final correctWord = _wordList[_currentIndex];
     final answer = _textController.text.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '');
@@ -142,28 +149,77 @@ class _SpellingScreenState extends State<SpellingScreen> {
     await _flutterTts.setSpeechRate(0.65);
     await _flutterTts.speak(message);
 
-    // Wait for speech to finish + 2 seconds
-    await Future.delayed(const Duration(seconds: 3)); // increased for safety
+    await Future.delayed(const Duration(seconds: 2));
 
     setState(() => _currentIndex++);
     _startNewWord();
   }
 
-  Future<void> _startPersistentListening() async {
-    if (_isListening) return;
-    final status = await Permission.microphone.request();
-    if (!status.isGranted) return;
+  Future<void> _startListening() async {
+    if (_isListening || !_speechReady) return;
 
-    final initialized = await _speech.initialize();
-    if (initialized) {
-      setState(() => _isListening = true);
-      _speech.listen(onResult: (result) => setState(() => _textController.text = result.recognizedWords));
+    final status = await Permission.microphone.request();
+    if (!status.isGranted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Microphone permission is required for speech mode')),
+        );
+      }
+      return;
     }
+
+    final initialized = await _speechToText.initialize(
+      onStatus: _onSpeechStatus,
+      onError: _onSpeechError,
+    );
+
+    if (!initialized) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Speech recognition is not available')),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isListening = true);
+
+    _speechToText.listen(
+      onResult: _onSpeechResult,
+      localeId: 'en_GB',
+      listenOptions: SpeechListenOptions(listenMode: ListenMode.confirmation),
+    );
   }
 
   void _stopListening() {
-    _speech.stop();
-    setState(() => _isListening = false);
+    if (_speechToText.isListening) {
+      _speechToText.stop();
+    }
+
+    if (mounted) {
+      setState(() => _isListening = false);
+    }
+  }
+
+  void _onSpeechResult(SpeechRecognitionResult result) {
+    final spoken = result.recognizedWords.toLowerCase();
+    final normalized = spoken.replaceAll(RegExp(r'[^a-z]'), '');
+    setState(() => _textController.text = normalized);
+  }
+
+  void _onSpeechStatus(String status) {
+    if (status == 'notListening' || status == 'done') {
+      if (mounted) setState(() => _isListening = false);
+    }
+  }
+
+  void _onSpeechError(SpeechRecognitionError error) {
+    debugPrint('Speech error: ${error.errorMsg}');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Speech error: ${error.errorMsg}')),
+      );
+    }
   }
 
   @override
@@ -172,7 +228,7 @@ class _SpellingScreenState extends State<SpellingScreen> {
     _textController.dispose();
     _focusNode.dispose();
     _flutterTts.stop();
-    _speech.stop();
+    _speechToText.stop();
     super.dispose();
   }
 
@@ -225,22 +281,57 @@ class _SpellingScreenState extends State<SpellingScreen> {
               icon: const Icon(Icons.replay),
               label: const Text("Repeat Word"),
             ),
-            const SizedBox(height: 60),
-            if (_mode == InputMode.keyboard)
-              TextField(
-                controller: _textController,
-                focusNode: _focusNode,
-                autocorrect: false,
-                enableSuggestions: false,
-                style: const TextStyle(fontSize: 32),
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  labelText: "Type your spelling",
-                ),
-                onSubmitted: (_) => _endRound(),
-              )
-            else
-              const Text("🎤 Speak each letter clearly...", style: TextStyle(fontSize: 28)),
+            const SizedBox(height: 40),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.deepOrange, width: 3),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: _mode == InputMode.keyboard
+                  ? TextField(
+                      controller: _textController,
+                      focusNode: _focusNode,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 32),
+                      decoration: const InputDecoration(
+                        border: InputBorder.none,
+                        hintText: 'Type your spelling...',
+                      ),
+                      textCapitalization: TextCapitalization.none,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                    )
+                  : Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _isListening ? Icons.mic : Icons.mic_none,
+                          color: Colors.deepOrange,
+                          size: 48,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _textController.text.isEmpty
+                              ? '🎤 Speak each letter clearly...'
+                              : _textController.text.toUpperCase(),
+                          style: const TextStyle(fontSize: 32),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+            ),
+            const SizedBox(height: 30),
+            ElevatedButton(
+              onPressed: _endRound,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepOrange,
+                padding: const EdgeInsets.symmetric(vertical: 22),
+                minimumSize: const Size(double.infinity, 70),
+              ),
+              child: const Text("SUBMIT ANSWER", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            ),
           ],
         ),
       ),
